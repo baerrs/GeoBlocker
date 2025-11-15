@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # GeoBlocker.sh — SSH US-only Geo-Limit helper for nftables (Ubuntu 24.04)
-# VERSION: v1.1.1
+# VERSION: v1.2.0
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
@@ -36,22 +36,25 @@
 #     - Usage limits and terms: https://www.ipdeny.com/usagelimits.php
 #
 # CHANGELOG
+# - v1.2.0:
+#     * Added SSH whitelist support (IPv4 + IPv6):
+#         - New nftables sets expected:
+#             - ssh_whitelist_v4 (type ipv4_addr)
+#             - ssh_whitelist_v6 (type ipv6_addr)
+#         - New actions:
+#             - --whitelist-add-current
+#             - --whitelist-add IP
+#             - --whitelist-remove IP
+#             - --whitelist-list
+#         - --investigate now reports whitelist set presence and whether
+#           the current SSH client IP (v4 or v6) is whitelisted.
 # - v1.1.1:
 #     * FIX: Corrected function call syntax in fast_load_sets()
-#       (bulk_load_one_set "$SET_V4" "$FILE_V4" style) to avoid
-#       "syntax error near unexpected token" on some shells.
+#       to avoid "syntax error near unexpected token" on some shells.
 # - v1.1.0:
-#     * Added SSH client information to --investigate output:
-#         - SSH_CONNECTION and SSH_CLIENT
-#         - Detected client public IP (first field of SSH_CONNECTION)
-#       This can be used later to build a whitelist feature.
+#     * Added SSH client information to --investigate output.
 # - v1.0.0:
 #     * Initial public release for Ubuntu 24.04.
-#     * Unified:
-#         - Investigation of nftables and geo data
-#         - Geo data download from IPdeny
-#         - Fast bulk loading of inet filter us_v4/us_v6
-#         - Optional commented SSH geo-snippet append to /etc/nftables.conf
 #
 # TARGET PLATFORM:
 #   - Ubuntu Server 24.04 (fresh install or similar)
@@ -66,6 +69,7 @@
 #     - Fast-loading inet filter us_v4/us_v6 sets from those files.
 #     - Optionally appending a commented SSH geo-limit snippet into
 #       /etc/nftables.conf for manual integration.
+#     - Managing SSH whitelist sets (ssh_whitelist_v4 / ssh_whitelist_v6).
 #
 # SAFETY NOTES:
 #   - This script does NOT automatically apply nftables configs.
@@ -88,7 +92,14 @@
 #        - table inet filter
 #        - sets us_v4/us_v6
 #        - SSH geo-limit rules (tcp dport 22 ... drop)
-#      (You can use --append-ssh-geo-snippet as a guided template.)
+#        - OPTIONAL whitelist sets:
+#             set ssh_whitelist_v4 { type ipv4_addr; flags interval; }
+#             set ssh_whitelist_v6 { type ipv6_addr; flags interval; }
+#          And in chain input (order matters):
+#             tcp dport 22 ip  saddr  @ssh_whitelist_v4 accept
+#             tcp dport 22 ip6 saddr @ssh_whitelist_v6 accept
+#             tcp dport 22 ip  saddr != @us_v4 drop
+#             tcp dport 22 ip6 saddr != @us_v6 drop
 #
 #   3) Apply nftables config:
 #        sudo nft -c -f /etc/nftables.conf
@@ -99,14 +110,18 @@
 #        sudo ./GeoBlocker.sh --fast-load
 #        sudo ./GeoBlocker.sh --verify-sets
 #
-#   5) (Optional) Add a cron/systemd timer to refresh IPdeny lists and reload
+#   5) Manage whitelist:
+#        sudo ./GeoBlocker.sh --whitelist-add-current   # add your current IP
+#        sudo ./GeoBlocker.sh --whitelist-list
+#
+#   6) (Optional) Add a cron/systemd timer to refresh IPdeny lists and reload
 #      sets daily using --setup-geo-data and --fast-load.
 #
 
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION='v1.1.1'
+VERSION='v1.2.0'
 SCRIPT_NAME="$(basename "$0")"
 
 # Paths and names (Ubuntu 24.04 defaults)
@@ -119,6 +134,9 @@ FAMILY="inet"
 TABLE="filter"
 SET_V4="us_v4"
 SET_V6="us_v6"
+
+WL_SET_V4="ssh_whitelist_v4"
+WL_SET_V6="ssh_whitelist_v6"
 
 CHUNK_SIZE=512   # number of CIDRs per bulk add command
 
@@ -141,9 +159,9 @@ require_cmd() {
 backup_file() {
   local path="$1"
   if [[ -f "$path" ]]; then
-    local ts
+    local ts backup
     ts="$(date +'%Y%m%d.%H%M%S')"
-    local backup="${path}.${ts}.bak"
+    backup="${path}.${ts}.bak"
     cp -a -- "$path" "$backup" || die "Failed to create backup of '$path' at '$backup'"
     log "Backup created: $backup"
   else
@@ -240,11 +258,24 @@ append_ssh_geo_snippet() {
 #         # Initially empty; elements are loaded at runtime.
 #     }
 #
+#     set ssh_whitelist_v4 {
+#         type ipv4_addr
+#         flags interval
+#     }
+#
+#     set ssh_whitelist_v6 {
+#         type ipv6_addr
+#         flags interval
+#     }
+#
 #     chain input {
 #         type filter hook input priority filter; policy accept;
 #
-#         # SSH Geo-Limit (apply BEFORE allowing SSH)
-#         # Uncomment and insert BEFORE your SSH ACCEPT rule:
+#         # Whitelist (always allow these SSH clients)
+#         #   tcp dport 22 ip  saddr  @ssh_whitelist_v4 accept
+#         #   tcp dport 22 ip6 saddr @ssh_whitelist_v6 accept
+#
+#         # SSH Geo-Limit (apply AFTER whitelist, BEFORE generic SSH ACCEPT)
 #         #   tcp dport 22 ip  saddr != @us_v4 drop
 #         #   tcp dport 22 ip6 saddr != @us_v6 drop
 #
@@ -366,10 +397,7 @@ fast_load_sets() {
 verify_sets() {
   check_sets_exist
 
-  local count_v4
-  local count_v6
-  local lines_v4
-  local lines_v6
+  local count_v4 count_v6 lines_v4 lines_v6
 
   count_v4="$(nft list set "$FAMILY" "$TABLE" "$SET_V4" | wc -l || echo 0)"
   count_v6="$(nft list set "$FAMILY" "$TABLE" "$SET_V6" | wc -l || echo 0)"
@@ -395,6 +423,112 @@ verify_sets() {
   echo "NOTE: 'nft list set' output may contain multiple elements per line."
   echo "      The loader's own logs show the exact element counts."
 }
+
+# ---------- Whitelist helpers (IPv4 + IPv6) ----------
+
+whitelist_set_for_ip() {
+  local ip="$1"
+  if [[ "$ip" == *:* ]]; then
+    echo "$WL_SET_V6"
+  else
+    echo "$WL_SET_V4"
+  fi
+}
+
+whitelist_check_set_exists_for_ip() {
+  local ip="$1"
+  local set_name
+  set_name="$(whitelist_set_for_ip "$ip")"
+  require_cmd nft
+  if ! nft list set "$FAMILY" "$TABLE" "$set_name" >/dev/null 2>&1; then
+    die "Whitelist set '$FAMILY $TABLE $set_name' not found. Define it in /etc/nftables.conf and apply it first."
+  fi
+}
+
+whitelist_add_ip() {
+  local ip="$1"
+  if [[ -z "$ip" ]]; then
+    die "No IP provided for whitelist-add."
+  fi
+
+  local set_name
+  set_name="$(whitelist_set_for_ip "$ip")"
+
+  whitelist_check_set_exists_for_ip "$ip"
+
+  # Idempotent: check if already present
+  if nft list set "$FAMILY" "$TABLE" "$set_name" 2>/dev/null | grep -qw "$ip"; then
+    log "IP '$ip' already present in whitelist set '$set_name'; nothing to do."
+    return 0
+  fi
+
+  log "Adding IP '$ip' to whitelist set '$set_name'"
+  nft add element "$FAMILY" "$TABLE" "$set_name" "{ $ip }"
+  log "IP '$ip' added to whitelist set '$set_name'"
+}
+
+whitelist_remove_ip() {
+  local ip="$1"
+  if [[ -z "$ip" ]]; then
+    die "No IP provided for whitelist-remove."
+  fi
+
+  local set_name
+  set_name="$(whitelist_set_for_ip "$ip")"
+
+  whitelist_check_set_exists_for_ip "$ip"
+
+  if ! nft list set "$FAMILY" "$TABLE" "$set_name" 2>/dev/null | grep -qw "$ip"; then
+    log "IP '$ip' is not present in whitelist set '$set_name'; nothing to remove."
+    return 0
+  fi
+
+  log "Removing IP '$ip' from whitelist set '$set_name'"
+  nft delete element "$FAMILY" "$TABLE" "$set_name" "{ $ip }"
+  log "IP '$ip' removed from whitelist set '$set_name'"
+}
+
+whitelist_add_current() {
+  if [[ -z "${SSH_CONNECTION:-}" ]]; then
+    die "SSH_CONNECTION is empty; not an SSH session. Run this from an SSH login."
+  fi
+
+  local conn client_ip
+  conn="$SSH_CONNECTION"
+  client_ip="${conn%% *}"
+
+  if [[ -z "$client_ip" ]]; then
+    die "Unable to parse client IP from SSH_CONNECTION='$SSH_CONNECTION'"
+  fi
+
+  whitelist_add_ip "$client_ip"
+}
+
+whitelist_list() {
+  require_cmd nft
+
+  echo "=== SSH Whitelist Sets ==="
+
+  if nft list set "$FAMILY" "$TABLE" "$WL_SET_V4" >/dev/null 2>&1; then
+    echo
+    echo "Set $FAMILY $TABLE $WL_SET_V4 (IPv4):"
+    nft list set "$FAMILY" "$TABLE" "$WL_SET_V4"
+  else
+    echo
+    echo "Set $FAMILY $TABLE $WL_SET_V4 (IPv4): NOT FOUND"
+  fi
+
+  if nft list set "$FAMILY" "$TABLE" "$WL_SET_V6" >/dev/null 2>&1; then
+    echo
+    echo "Set $FAMILY $TABLE $WL_SET_V6 (IPv6):"
+    nft list set "$FAMILY" "$TABLE" "$WL_SET_V6"
+  else
+    echo
+    echo "Set $FAMILY $TABLE $WL_SET_V6 (IPv6): NOT FOUND"
+  fi
+}
+
+# ---------- Investigation ----------
 
 investigate() {
   echo "=== SSH Geo-Limit Investigation ==="
@@ -447,6 +581,18 @@ investigate() {
       else
         echo "set $FAMILY $TABLE $SET_V6: NOT FOUND"
       fi
+
+      if nft list set "$FAMILY" "$TABLE" "$WL_SET_V4" >/dev/null 2>&1; then
+        echo "set $FAMILY $TABLE $WL_SET_V4: present (whitelist IPv4)"
+      else
+        echo "set $FAMILY $TABLE $WL_SET_V4: NOT FOUND (whitelist IPv4)"
+      fi
+
+      if nft list set "$FAMILY" "$TABLE" "$WL_SET_V6" >/dev/null 2>&1; then
+        echo "set $FAMILY $TABLE $WL_SET_V6: present (whitelist IPv6)"
+      else
+        echo "set $FAMILY $TABLE $WL_SET_V6: NOT FOUND (whitelist IPv6)"
+      fi
     else
       echo "Unable to list nftables tables (nft list tables failed)."
     fi
@@ -492,18 +638,54 @@ investigate() {
   echo
 
   echo "--- SSH Client Info ---"
+  local client_ip=""
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
-    local conn client_ip
+    local conn
     conn="$SSH_CONNECTION"
     client_ip="${conn%% *}"
     echo "SSH_CONNECTION: $conn"
     echo "SSH_CLIENT:     ${SSH_CLIENT:-"(not set)"}"
     echo "Client public IP (from SSH_CONNECTION): $client_ip"
-    echo
-    echo "NOTE: This client IP can be used in future to build a whitelist"
-    echo "      (e.g., separate ssh_whitelist set in nftables)."
   else
     echo "Not an SSH session (SSH_CONNECTION is empty)."
+  fi
+  echo
+
+  echo "--- SSH Whitelist Status ---"
+  if ! command -v nft >/dev/null 2>&1; then
+    echo "Cannot inspect whitelist: nft command is missing."
+  else
+    local wl_v4_present="NO"
+    local wl_v6_present="NO"
+    if nft list set "$FAMILY" "$TABLE" "$WL_SET_V4" >/dev/null 2>&1; then
+      wl_v4_present="YES"
+    fi
+    if nft list set "$FAMILY" "$TABLE" "$WL_SET_V6" >/dev/null 2>&1; then
+      wl_v6_present="YES"
+    fi
+
+    echo "Whitelist set $WL_SET_V4 (IPv4): $wl_v4_present"
+    echo "Whitelist set $WL_SET_V6 (IPv6): $wl_v6_present"
+
+    if [[ -n "$client_ip" ]]; then
+      # Determine which whitelist set would be used
+      local wl_set_for_client whitelisted="UNKNOWN"
+      wl_set_for_client="$(whitelist_set_for_ip "$client_ip")"
+
+      if nft list set "$FAMILY" "$TABLE" "$wl_set_for_client" >/dev/null 2>&1; then
+        if nft list set "$FAMILY" "$TABLE" "$wl_set_for_client" 2>/dev/null | grep -qw "$client_ip"; then
+          whitelisted="YES (in $wl_set_for_client)"
+        else
+          whitelisted="NO (not in $wl_set_for_client)"
+        fi
+      else
+        whitelisted="N/A (whitelist set $wl_set_for_client not defined)"
+      fi
+
+      echo "Current SSH client whitelisted: $whitelisted"
+    else
+      echo "Current SSH client whitelisted: N/A (no SSH client IP detected)"
+    fi
   fi
 
   echo
@@ -524,7 +706,9 @@ ACTIONS:
         - Presence of $NFT_CONF
         - table $FAMILY $TABLE and sets $SET_V4 / $SET_V6
         - Geo data files and RSBB SSH snippet marker.
-        - SSH client information (SSH_CONNECTION, SSH_CLIENT, and detected client IP).
+        - SSH client information (SSH_CONNECTION, SSH_CLIENT, client IP).
+        - Whitelist sets ($WL_SET_V4 / $WL_SET_V6) and whether the current
+          SSH client IP is whitelisted.
 
   --setup-geo-data
       Create $GEO_DIR (if needed) and download from IPdeny:
@@ -538,6 +722,7 @@ ACTIONS:
       Backup $NFT_CONF and append a COMMENTED example snippet
       (RSBB_SSH_GEO_LIMIT block) describing how to:
         - Define us_v4/us_v6 sets
+        - Define ssh_whitelist_v4/ssh_whitelist_v6 sets
         - Add SSH geo-limit rules for port 22
       You must manually integrate these into your inet filter table.
 
@@ -556,6 +741,29 @@ ACTIONS:
         - $FAMILY $TABLE $SET_V6
       And compare to the geo files' line counts.
 
+  --whitelist-add-current
+      Add the current SSH client IP (IPv4 or IPv6) to the appropriate
+      whitelist set:
+        - IPv4 -> $WL_SET_V4
+        - IPv6 -> $WL_SET_V6
+      Requires:
+        - SSH session (SSH_CONNECTION set)
+        - Corresponding whitelist set defined in nftables and applied.
+
+  --whitelist-add IP
+      Add the given IP (IPv4 or IPv6) to the appropriate whitelist set:
+        - IPv4 -> $WL_SET_V4
+        - IPv6 -> $WL_SET_V6
+
+  --whitelist-remove IP
+      Remove the given IP (IPv4 or IPv6) from the appropriate whitelist set.
+      No error if the IP is not already present; logs and returns success.
+
+  --whitelist-list
+      List the contents of:
+        - $FAMILY $TABLE $WL_SET_V4 (if present)
+        - $FAMILY $TABLE $WL_SET_V6 (if present)
+
   --help, -h
       Show this help.
 
@@ -569,6 +777,8 @@ NOTES:
         sudo nft -f $NFT_CONF      # apply
   - Ensure table $FAMILY $TABLE and sets $SET_V4/$SET_V6 are defined
     in your nftables config and applied before using --fast-load.
+  - Ensure whitelist sets $WL_SET_V4/$WL_SET_V6 are defined if you intend
+    to use whitelist actions.
   - Geo IP data source: IPdeny (https://www.ipdeny.com).
     Please review their usage limits: https://www.ipdeny.com/usagelimits.php
 EOF
@@ -598,6 +808,20 @@ main() {
       ;;
     --verify-sets)
       verify_sets
+      ;;
+    --whitelist-add-current)
+      whitelist_add_current
+      ;;
+    --whitelist-add)
+      shift || die "Missing IP argument for --whitelist-add"
+      whitelist_add_ip "${1:-}"
+      ;;
+    --whitelist-remove)
+      shift || die "Missing IP argument for --whitelist-remove"
+      whitelist_remove_ip "${1:-}"
+      ;;
+    --whitelist-list)
+      whitelist_list
       ;;
     *)
       die "Unknown action '$action'. Use --help for usage."
