@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # GeoBlocker.sh — SSH US-only Geo-Limit helper for nftables (Ubuntu 24.04)
-# VERSION: v1.2.0
+# VERSION: v1.2.1
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
@@ -36,21 +36,25 @@
 #     - Usage limits and terms: https://www.ipdeny.com/usagelimits.php
 #
 # CHANGELOG
+# - v1.2.1:
+#     * Added explicit privilege detection helpers:
+#         - require_root(): enforce root for actions that modify system files.
+#         - require_nft_priv(): verify that 'nft list tables' works (privileges).
+#       Integrated into geo-data setup, config editing, and nft-modifying actions.
+#       Investigation output now exposes privilege context more clearly.
 # - v1.2.0:
-#     * Added SSH whitelist support (IPv4 + IPv6):
-#         - New nftables sets expected:
-#             - ssh_whitelist_v4 (type ipv4_addr)
-#             - ssh_whitelist_v6 (type ipv6_addr)
-#         - New actions:
+#     * Added SSH whitelist support (IPv4 + IPv6) with:
+#         - ssh_whitelist_v4 / ssh_whitelist_v6 sets (user-defined in nftables).
+#         - Actions:
 #             - --whitelist-add-current
 #             - --whitelist-add IP
 #             - --whitelist-remove IP
 #             - --whitelist-list
-#         - --investigate now reports whitelist set presence and whether
-#           the current SSH client IP (v4 or v6) is whitelisted.
+#         - --investigate reports whitelist set presence and whether the
+#           current SSH client IP (v4 or v6) is whitelisted.
 # - v1.1.1:
-#     * FIX: Corrected function call syntax in fast_load_sets()
-#       to avoid "syntax error near unexpected token" on some shells.
+#     * FIX: Corrected function call syntax in fast_load_sets() to avoid
+#       syntax errors on some shells.
 # - v1.1.0:
 #     * Added SSH client information to --investigate output.
 # - v1.0.0:
@@ -121,8 +125,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-VERSION='v1.2.0'
+VERSION='v1.2.1'
 SCRIPT_NAME="$(basename "$0")"
+ACTION="${1:-"--help"}"
 
 # Paths and names (Ubuntu 24.04 defaults)
 NFT_CONF="/etc/nftables.conf"
@@ -156,6 +161,19 @@ require_cmd() {
   fi
 }
 
+require_root() {
+  if [[ $EUID -ne 0 ]]; then
+    die "This action requires root privileges. Try: sudo $SCRIPT_NAME $ACTION ..."
+  fi
+}
+
+require_nft_priv() {
+  require_cmd nft
+  if ! nft list tables >/dev/null 2>&1; then
+    die "Unable to run 'nft list tables'. You likely need root. Try: sudo $SCRIPT_NAME $ACTION ..."
+  fi
+}
+
 backup_file() {
   local path="$1"
   if [[ -f "$path" ]]; then
@@ -173,6 +191,7 @@ download_file_atomic() {
   local url="$1"
   local dest="$2"
 
+  require_root
   require_cmd curl
   require_cmd install
 
@@ -202,6 +221,7 @@ download_file_atomic() {
 }
 
 setup_geo_data() {
+  require_root
   mkdir -p "$GEO_DIR" || die "Failed to create directory '$GEO_DIR'"
 
   download_file_atomic "https://www.ipdeny.com/ipblocks/data/countries/us.zone" "$FILE_V4"
@@ -211,6 +231,7 @@ setup_geo_data() {
 }
 
 append_ssh_geo_snippet() {
+  require_root
   require_cmd install
 
   if [[ ! -f "$NFT_CONF" ]]; then
@@ -301,7 +322,7 @@ EOF_SNIPPET
 }
 
 check_sets_exist() {
-  require_cmd nft
+  require_nft_priv
 
   if ! nft list set "$FAMILY" "$TABLE" "$SET_V4" >/dev/null 2>&1; then
     die "Set '$FAMILY $TABLE $SET_V4' not found. Ensure /etc/nftables.conf defines it and is applied."
@@ -439,7 +460,7 @@ whitelist_check_set_exists_for_ip() {
   local ip="$1"
   local set_name
   set_name="$(whitelist_set_for_ip "$ip")"
-  require_cmd nft
+  require_nft_priv
   if ! nft list set "$FAMILY" "$TABLE" "$set_name" >/dev/null 2>&1; then
     die "Whitelist set '$FAMILY $TABLE $set_name' not found. Define it in /etc/nftables.conf and apply it first."
   fi
@@ -505,7 +526,7 @@ whitelist_add_current() {
 }
 
 whitelist_list() {
-  require_cmd nft
+  require_nft_priv
 
   echo "=== SSH Whitelist Sets ==="
 
@@ -535,9 +556,28 @@ investigate() {
   echo "Script version: $VERSION"
   echo
 
+  echo "--- Privileges ---"
+  echo "EUID:       $EUID"
+  echo "USER:       ${USER:-"(unknown)"}"
+  echo "SUDO_USER:  ${SUDO_USER:-"(not set)"}"
+  if [[ $EUID -eq 0 ]]; then
+    if [[ -n "${SUDO_USER:-}" ]]; then
+      echo "Running as: root (via sudo from user '${SUDO_USER}')"
+    else
+      echo "Running as: root (direct)"
+    fi
+  else
+    echo "Running as: non-root"
+  fi
+  echo
+
   echo "--- Commands ---"
   if command -v nft >/dev/null 2>&1; then
-    echo "nft:        present"
+    if nft list tables >/dev/null 2>&1; then
+      echo "nft:        present (privileges OK)"
+    else
+      echo "nft:        present, but 'nft list tables' FAILED (likely insufficient privileges; try sudo)"
+    fi
   else
     echo "nft:        MISSING"
   fi
@@ -668,9 +708,9 @@ investigate() {
     echo "Whitelist set $WL_SET_V6 (IPv6): $wl_v6_present"
 
     if [[ -n "$client_ip" ]]; then
-      # Determine which whitelist set would be used
-      local wl_set_for_client whitelisted="UNKNOWN"
+      local wl_set_for_client whitelisted
       wl_set_for_client="$(whitelist_set_for_ip "$client_ip")"
+      whitelisted="UNKNOWN"
 
       if nft list set "$FAMILY" "$TABLE" "$wl_set_for_client" >/dev/null 2>&1; then
         if nft list set "$FAMILY" "$TABLE" "$wl_set_for_client" 2>/dev/null | grep -qw "$client_ip"; then
@@ -702,7 +742,8 @@ USAGE:
 ACTIONS:
   --investigate
       Show:
-        - Presence of nft / curl / install
+        - Privilege context (EUID, USER, SUDO_USER)
+        - Presence of nft / curl / install (and whether nft has privileges)
         - Presence of $NFT_CONF
         - table $FAMILY $TABLE and sets $SET_V4 / $SET_V6
         - Geo data files and RSBB SSH snippet marker.
@@ -711,7 +752,7 @@ ACTIONS:
           SSH client IP is whitelisted.
 
   --setup-geo-data
-      Create $GEO_DIR (if needed) and download from IPdeny:
+      (Requires root) Create $GEO_DIR (if needed) and download from IPdeny:
         - $FILE_V4 (IPv4 US ranges)
         - $FILE_V6 (IPv6 US ranges)
       Existing files are backed up with timestamped .bak copies.
@@ -719,7 +760,7 @@ ACTIONS:
       IPdeny usage limits: https://www.ipdeny.com/usagelimits.php
 
   --append-ssh-geo-snippet
-      Backup $NFT_CONF and append a COMMENTED example snippet
+      (Requires root) Backup $NFT_CONF and append a COMMENTED example snippet
       (RSBB_SSH_GEO_LIMIT block) describing how to:
         - Define us_v4/us_v6 sets
         - Define ssh_whitelist_v4/ssh_whitelist_v6 sets
@@ -727,40 +768,36 @@ ACTIONS:
       You must manually integrate these into your inet filter table.
 
   --fast-load
-      Flush and bulk-load nftables sets:
+      (Requires nft privileges) Flush and bulk-load nftables sets:
         - $FAMILY $TABLE $SET_V4 from $FILE_V4
         - $FAMILY $TABLE $SET_V6 from $FILE_V6
       Uses chunked inserts (${CHUNK_SIZE} CIDRs per nft add command) for speed.
 
   --flush-sets
-      Flush $FAMILY $TABLE $SET_V4 and $SET_V6 only.
+      (Requires nft privileges) Flush $FAMILY $TABLE $SET_V4 and $SET_V6 only.
 
   --verify-sets
-      Show approximate line counts in:
+      (Requires nft privileges) Show approximate line counts in:
         - $FAMILY $TABLE $SET_V4
         - $FAMILY $TABLE $SET_V6
       And compare to the geo files' line counts.
 
   --whitelist-add-current
-      Add the current SSH client IP (IPv4 or IPv6) to the appropriate
-      whitelist set:
+      (Requires nft privileges) Add the current SSH client IP (IPv4 or IPv6)
+      to the appropriate whitelist set:
         - IPv4 -> $WL_SET_V4
         - IPv6 -> $WL_SET_V6
-      Requires:
-        - SSH session (SSH_CONNECTION set)
-        - Corresponding whitelist set defined in nftables and applied.
 
   --whitelist-add IP
-      Add the given IP (IPv4 or IPv6) to the appropriate whitelist set:
-        - IPv4 -> $WL_SET_V4
-        - IPv6 -> $WL_SET_V6
+      (Requires nft privileges) Add the given IP (IPv4 or IPv6) to the
+      appropriate whitelist set.
 
   --whitelist-remove IP
-      Remove the given IP (IPv4 or IPv6) from the appropriate whitelist set.
-      No error if the IP is not already present; logs and returns success.
+      (Requires nft privileges) Remove the given IP (IPv4 or IPv6) from the
+      appropriate whitelist set. No error if the IP is not already present.
 
   --whitelist-list
-      List the contents of:
+      (Requires nft privileges) List the contents of:
         - $FAMILY $TABLE $WL_SET_V4 (if present)
         - $FAMILY $TABLE $WL_SET_V6 (if present)
 
@@ -785,9 +822,7 @@ EOF
 }
 
 main() {
-  local action="${1:-"--help"}"
-
-  case "$action" in
+  case "$ACTION" in
     --help|-h)
       print_help
       ;;
@@ -824,7 +859,7 @@ main() {
       whitelist_list
       ;;
     *)
-      die "Unknown action '$action'. Use --help for usage."
+      die "Unknown action '$ACTION'. Use --help for usage."
       ;;
   esac
 }
