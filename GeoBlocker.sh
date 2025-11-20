@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # GeoBlocker.sh — SSH US-only Geo-Limit helper for nftables (Ubuntu 24.04)
-# VERSION: v1.2.1
+# VERSION: v1.2.2
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
@@ -31,11 +31,14 @@
 # THE SOFTWARE.
 #
 # GEO IP DATA SOURCE:
-#   IPv4 and IPv6 US ranges are downloaded from IPdeny:
+#   IPv4 and IPv6 ranges are downloaded from IPdeny (default country: US):
 #     - https://www.ipdeny.com
 #     - Usage limits and terms: https://www.ipdeny.com/usagelimits.php
 #
 # CHANGELOG
+# - v1.2.2:
+#     * Allow overriding the IPdeny country via COUNTRY_CODE (default: 'us').
+#     * Minor argument handling cleanup for whitelist add/remove actions.
 # - v1.2.1:
 #     * Added explicit privilege detection helpers:
 #         - require_root(): enforce root for actions that modify system files.
@@ -124,6 +127,9 @@
 
 set -euo pipefail
 IFS=$'\n\t'
+
+# Country code for Geo IP data (IPdeny, ISO 3166-1 alpha-2, lowercase)
+COUNTRY_CODE="${COUNTRY_CODE:-us}"
 
 VERSION='v1.2.1'
 SCRIPT_NAME="$(basename "$0")"
@@ -224,11 +230,12 @@ setup_geo_data() {
   require_root
   mkdir -p "$GEO_DIR" || die "Failed to create directory '$GEO_DIR'"
 
-  download_file_atomic "https://www.ipdeny.com/ipblocks/data/countries/us.zone" "$FILE_V4"
-  download_file_atomic "https://www.ipdeny.com/ipv6/ipaddresses/blocks/us.zone" "$FILE_V6"
+  download_file_atomic "https://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE}.zone" "$FILE_V4"
+  download_file_atomic "https://www.ipdeny.com/ipv6/ipaddresses/blocks/${COUNTRY_CODE}.zone" "$FILE_V6"
 
-  log "Geo data setup complete in '$GEO_DIR'"
+  log "Geo data setup complete in '$GEO_DIR' (COUNTRY_CODE=${COUNTRY_CODE})"
 }
+
 
 append_ssh_geo_snippet() {
   require_root
@@ -753,8 +760,8 @@ ACTIONS:
 
   --setup-geo-data
       (Requires root) Create $GEO_DIR (if needed) and download from IPdeny:
-        - $FILE_V4 (IPv4 US ranges)
-        - $FILE_V6 (IPv6 US ranges)
+        - $FILE_V4 (IPv4 ranges for COUNTRY_CODE, default: us)
+        - $FILE_V6 (IPv6 ranges for COUNTRY_CODE, default: us)
       Existing files are backed up with timestamped .bak copies.
       Writes atomically using 'install'.
       IPdeny usage limits: https://www.ipdeny.com/usagelimits.php
@@ -818,6 +825,8 @@ NOTES:
     to use whitelist actions.
   - Geo IP data source: IPdeny (https://www.ipdeny.com).
     Please review their usage limits: https://www.ipdeny.com/usagelimits.php
+  - You can override the IPdeny country when setting up geo data via:
+    COUNTRY_CODE=<cc> sudo ./$SCRIPT_NAME --setup-geo-data
 EOF
 }
 
