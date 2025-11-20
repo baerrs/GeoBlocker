@@ -849,11 +849,11 @@ main() {
       ;;
     --whitelist-add)
       shift || die "Missing IP argument for --whitelist-add"
-      whitelist_add_ip "${1:-}"
+      whitelist_add_ip "$1"
       ;;
     --whitelist-remove)
       shift || die "Missing IP argument for --whitelist-remove"
-      whitelist_remove_ip "${1:-}"
+      whitelist_remove_ip "$1"
       ;;
     --whitelist-list)
       whitelist_list
