@@ -1,7 +1,7 @@
 # GeoBlocker
 
 GeoBlocker is a Bash helper script for **Ubuntu 24.04** servers that want to:
-- Restrict **SSH (port 22)** to **US-only** IP ranges using nftables.
+- Restrict **SSH (port 22)** to **Contry spicific-only** IP ranges using nftables. US by default
 - Keep US IPv4/IPv6 ranges updated from **IPdeny**.
 - Quickly bulk-load those ranges into nftables sets.
 - Optionally maintain **SSH whitelists** (IPv4 + IPv6) for trusted addresses.
