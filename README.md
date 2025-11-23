@@ -14,8 +14,8 @@ GeoBlocker is a Bash helper script for **Ubuntu 24.04** servers that want to:
 
 ## Features
 
-- ✅ Downloads US-only IPv4 and IPv6 ranges from **IPdeny**
-- ✅ Stores them in `/etc/nftables.d/us-v4.txt` and `/etc/nftables.d/us-v6.txt`
+- ✅ Downloads Contry spicific -only IPv4 and IPv6 ranges from **IPdeny**
+- ✅ Stores them in `/etc/nftables.d/us-v4.txt` and `/etc/nftables.d/us-v6.txt` <-- file names will be for US, but are for any country.  I will change this later
 - ✅ Bulk-loads them into nftables sets:
   - `inet filter us_v4`
   - `inet filter us_v6`
