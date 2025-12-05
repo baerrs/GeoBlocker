@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # GeoBlocker.sh — SSH US-only Geo-Limit helper for nftables (Ubuntu 24.04)
-# VERSION: v1.2.2
+# VERSION: v1.3.0
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
@@ -36,6 +36,12 @@
 #     - Usage limits and terms: https://www.ipdeny.com/usagelimits.php
 #
 # CHANGELOG
+# - v1.3.0:
+#     * UFW Compatibility / Pre-Filter Mode:
+#         - Changed default TABLE from 'filter' to 'geoblocker' to avoid UFW conflicts.
+#         - Updated configuration snippet to use Priority -150 (Runs before UFW).
+#         - Updated configuration snippet to use 'return' verdict (Hands off to UFW)
+#           instead of 'accept', ensuring UFW still manages port rules.
 # - v1.2.2:
 #     * Allow overriding the IPdeny country via COUNTRY_CODE (default: 'us').
 #     * Minor argument handling cleanup for whitelist add/remove actions.
@@ -96,17 +102,9 @@
 #        sudo systemctl enable --now nftables
 #
 #   2) Edit /etc/nftables.conf to define:
-#        - table inet filter
+#        - table inet geoblocker
 #        - sets us_v4/us_v6
-#        - SSH geo-limit rules (tcp dport 22 ... drop)
-#        - OPTIONAL whitelist sets:
-#             set ssh_whitelist_v4 { type ipv4_addr; flags interval; }
-#             set ssh_whitelist_v6 { type ipv6_addr; flags interval; }
-#          And in chain input (order matters):
-#             tcp dport 22 ip  saddr  @ssh_whitelist_v4 accept
-#             tcp dport 22 ip6 saddr @ssh_whitelist_v6 accept
-#             tcp dport 22 ip  saddr != @us_v4 drop
-#             tcp dport 22 ip6 saddr != @us_v6 drop
+#        - Pre-filter rules (priority -150)
 #
 #   3) Apply nftables config:
 #        sudo nft -c -f /etc/nftables.conf
@@ -131,7 +129,7 @@ IFS=$'\n\t'
 # Country code for Geo IP data (IPdeny, ISO 3166-1 alpha-2, lowercase)
 COUNTRY_CODE="${COUNTRY_CODE:-us}"
 
-VERSION='v1.2.1'
+VERSION='v1.3.0'
 SCRIPT_NAME="$(basename "$0")"
 ACTION="${1:-"--help"}"
 
@@ -142,7 +140,7 @@ FILE_V4="$GEO_DIR/us-v4.txt"
 FILE_V6="$GEO_DIR/us-v6.txt"
 
 FAMILY="inet"
-TABLE="filter"
+TABLE="geoblocker"  # Changed from 'filter' to avoid UFW conflicts
 SET_V4="us_v4"
 SET_V6="us_v6"
 
@@ -265,49 +263,45 @@ append_ssh_geo_snippet() {
 
 # =====================================================================
 # RSBB_SSH_GEO_LIMIT BEGIN
-# This is a commented example snippet for SSH geo-limiting to US IPs.
-# You MUST manually integrate the sets and rules into your existing
-# table inet filter / chain input (before your SSH ACCEPT rule).
+# This is a commented snippet for UFW-Compatible Geo-Blocking.
+# It defines a separate table 'geoblocker' that runs BEFORE UFW.
 #
-# Example nftables structure (Ubuntu 24.04 compatible):
+# Logic:
+#   1. Allow Loopback/LAN (Ignore internal traffic)
+#   2. Whitelist/US IPs -> 'return' (Pass to UFW to check ports)
+#   3. Everything else -> 'drop' (Stop it before UFW sees it)
 #
-# table inet filter {
-#     # (your existing sets & rules...)
+# You MUST manually integrate this into /etc/nftables.conf
 #
-#     set us_v4 {
-#         type ipv4_addr
-#         flags interval
-#         # Initially empty; elements are loaded at runtime.
-#     }
-#
-#     set us_v6 {
-#         type ipv6_addr
-#         flags interval
-#         # Initially empty; elements are loaded at runtime.
-#     }
-#
-#     set ssh_whitelist_v4 {
-#         type ipv4_addr
-#         flags interval
-#     }
-#
-#     set ssh_whitelist_v6 {
-#         type ipv6_addr
-#         flags interval
-#     }
+# table inet geoblocker {
+#     set us_v4 { type ipv4_addr; flags interval; }
+#     set us_v6 { type ipv6_addr; flags interval; }
+#     set ssh_whitelist_v4 { type ipv4_addr; flags interval; }
+#     set ssh_whitelist_v6 { type ipv6_addr; flags interval; }
 #
 #     chain input {
-#         type filter hook input priority filter; policy accept;
+#         # Priority -150 ensures this runs BEFORE UFW (priority 0)
+#         type filter hook input priority -150; policy accept;
 #
-#         # Whitelist (always allow these SSH clients)
-#         #   tcp dport 22 ip  saddr  @ssh_whitelist_v4 accept
-#         #   tcp dport 22 ip6 saddr @ssh_whitelist_v6 accept
+#         # 1. Safety: Allow Localhost & LAN to bypass geo-check
+#         iif "lo" accept
+#         ip saddr 10.0.0.0/8 return
+#         ip saddr 172.16.0.0/12 return
+#         ip saddr 192.168.0.0/16 return
 #
-#         # SSH Geo-Limit (apply AFTER whitelist, BEFORE generic SSH ACCEPT)
-#         #   tcp dport 22 ip  saddr != @us_v4 drop
-#         #   tcp dport 22 ip6 saddr != @us_v6 drop
+#         # 2. Whitelist: If matched, RETURN to UFW
+#         ip saddr @ssh_whitelist_v4 return
+#         ip6 saddr @ssh_whitelist_v6 return
 #
-#         # (rest of your chain...)
+#         # 3. Existing Connections: Accept
+#         ct state established,related accept
+#
+#         # 4. US Traffic: RETURN to UFW (Let UFW decide if ports are open)
+#         ip saddr @us_v4 return
+#         ip6 saddr @us_v6 return
+#
+#         # 5. The Block: Drop everything else
+#         drop
 #     }
 # }
 #
@@ -441,7 +435,7 @@ verify_sets() {
     lines_v6="0"
   fi
 
-  echo "=== Verification for inet filter us_v4/us_v6 ==="
+  echo "=== Verification for inet $TABLE us_v4/us_v6 ==="
   echo "Set: $FAMILY $TABLE $SET_V4 -> approx $count_v4 lines in nft list output"
   echo "  Geo file: $FILE_V4 -> $lines_v4 lines"
   echo
