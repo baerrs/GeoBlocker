@@ -1,48 +1,54 @@
 # GeoBlocker
 
 GeoBlocker is a Bash helper script for **Ubuntu 24.04** servers that want to:
-- Restrict **SSH (port 22)** to **Contry spicific-only** IP ranges using nftables. US by default
-- Keep US IPv4/IPv6 ranges updated from **IPdeny**.
-- Quickly bulk-load those ranges into nftables sets.
-- Optionally maintain **SSH whitelists** (IPv4 + IPv6) for trusted addresses.
-- Inspect your current setup with a safe **investigation** mode.
 
-> ⚠️ GeoBlocker does **not** automatically modify your live nftables ruleset or apply configs.
+- Restrict **SSH (port 22)** to **Country-Specific** IP ranges using nftables (US by default)
+- **Run safely alongside UFW:** Uses a separate table with **Priority -150** to filter traffic *before* it hits UFW
+- Keep IPv4/IPv6 ranges updated from **IPdeny**
+- Bulk-load those ranges into nftables sets
+- Optionally maintain **SSH whitelists** (IPv4 + IPv6) for trusted addresses
+- Inspect your current setup with a safe **investigation** mode
+
+> ⚠️ GeoBlocker does **not** automatically modify your live nftables ruleset or apply configs.  
 > You stay in control of `/etc/nftables.conf` and when `nft -f` is run.
 
 ---
 
 ## Features
 
-- ✅ Downloads Contry spicific -only IPv4 and IPv6 ranges from **IPdeny**
-- ✅ Stores them in `/etc/nftables.d/us-v4.txt` and `/etc/nftables.d/us-v6.txt` <-- file names will be for US, but are for any country.  I will change this later
+- ✅ **UFW Compatible:** Runs as a "Pre-Filter" (Priority -150). Drops bad traffic immediately; hands valid traffic (`return`) to UFW.
+- ✅ Downloads Country-Specific IPv4/IPv6 ranges from **IPdeny** (Default: US)
+- ✅ Stores them in:
+  - `/etc/nftables.d/us-v4.txt`
+  - `/etc/nftables.d/us-v6.txt`
 - ✅ Bulk-loads them into nftables sets:
-  - `inet filter us_v4`
-  - `inet filter us_v6`
+  - `inet geoblocker us_v4`
+  - `inet geoblocker us_v6`
 - ✅ Optional SSH whitelist sets:
-  - `ssh_whitelist_v4` (IPv4)
-  - `ssh_whitelist_v6` (IPv6)
+  - `ssh_whitelist_v4`
+  - `ssh_whitelist_v6`
 - ✅ `--investigate` mode shows:
-  - Privilege context (root/sudo/non-root)
-  - nftables status and required sets
+  - User/privilege context
+  - nftables status
+  - Required sets
   - Geo data presence
-  - SSH client IP and whitelist status
-- ✅ Safer operations:
-  - Timestamped backups for changed files
-  - Atomic writes using `install`
-  - No automatic rule application
+  - SSH client IP + whitelist status
+- ✅ Safety:
+  - Timestamped backups of changed files
+  - Atomic writes via `install`
+  - No automatic config application
 
 ---
 
 ## Requirements
 
-- Ubuntu Server **24.04** (or similar)
-- `nft` (nftables) installed
-- Root or sudo privileges for most actions
-- Network access to:
-  - `https://www.ipdeny.com`
+- Ubuntu **24.04**
+- `nft` (nftables)
+- Root or sudo
+- Network access to:  
+  `https://www.ipdeny.com`
 
-Install nftables if needed:
+### Install nftables
 
 ```bash
 sudo apt update
@@ -52,9 +58,9 @@ sudo systemctl enable --now nftables
 
 ---
 
-## Installation
+# Installation
 
-Clone the repository and make the script executable:
+Clone the repo and make the script executable:
 
 ```bash
 git clone https://github.com/baerrs/GeoBlocker.git
@@ -62,55 +68,54 @@ cd GeoBlocker
 chmod +x GeoBlocker.sh
 ```
 
-> Note: The repo may already mark `GeoBlocker.sh` as executable; `chmod` is just a safety step.
+*(Note: The repo may already mark the file executable.)*
 
 ---
 
-## Example nftables Configuration
+# Example nftables Configuration
 
-Below is a **minimal example** of how your `/etc/nftables.conf` might define the needed sets and SSH rules.
+Add this to **/etc/nftables.conf**.
+
+> **Critical:** Priority **-150** ensures this runs before UFW (priority 0).  
+> **auto-merge** is required for overlapping IPdeny ranges.
 
 ```nft
 #!/usr/sbin/nft -f
 
-table inet filter {
-    set us_v4 {
-        type ipv4_addr
-        flags interval
-    }
+table inet geoblocker {
+    # Sets
+    set us_v4 { type ipv4_addr; flags interval; auto-merge; }
+    set us_v6 { type ipv6_addr; flags interval; auto-merge; }
+    set ssh_whitelist_v4 { type ipv4_addr; flags interval; }
+    set ssh_whitelist_v6 { type ipv6_addr; flags interval; }
 
-    set us_v6 {
-        type ipv6_addr
-        flags interval
-    }
+    chain input_chain {
+        type filter hook input priority -150; policy accept;
 
-    set ssh_whitelist_v4 {
-        type ipv4_addr
-        flags interval
-    }
+        # Local bypass
+        iif "lo" accept
+        ip saddr 10.0.0.0/8 return
+        ip saddr 172.16.0.0/12 return
+        ip saddr 192.168.0.0/16 return
 
-    set ssh_whitelist_v6 {
-        type ipv6_addr
-        flags interval
-    }
+        # Whitelist
+        ip saddr @ssh_whitelist_v4 return
+        ip6 saddr @ssh_whitelist_v6 return
 
-    chain input {
-        type filter hook input priority filter; policy accept;
+        # Existing connections
+        ct state established,related accept
 
-        # Always allow SSH from whitelisted IPs
-        tcp dport 22 ip  saddr  @ssh_whitelist_v4 accept
-        tcp dport 22 ip6 saddr @ssh_whitelist_v6 accept
+        # US traffic
+        ip saddr @us_v4 return
+        ip6 saddr @us_v6 return
 
-        # Geo-limit: only US IPs may reach SSH
-        tcp dport 22 ip  saddr != @us_v4 drop
-        tcp dport 22 ip6 saddr != @us_v6 drop
-
-        # ...your remaining rules (e.g., generic SSH accept) ...
+        # Block all others
+        drop
     }
 }
 ```
 
-After editing your config, always validate and apply:
+Apply:
 
 ```bash
 sudo nft -c -f /etc/nftables.conf   # validate
@@ -119,49 +124,92 @@ sudo nft -f /etc/nftables.conf      # apply
 
 ---
 
-## Typical Workflow
+# Typical Workflow
 
-1. **Prepare nftables config**  
-   Make sure `/etc/nftables.conf` defines:
-   - `table inet filter`
-   - `us_v4` / `us_v6` sets
-   - (Optional) `ssh_whitelist_v4` / `ssh_whitelist_v6` sets
-   - SSH rules that reference those sets
+### 1. Prepare nftables config  
+Make sure `/etc/nftables.conf` defines:
 
-2. **Apply the config**
+- `table inet geoblocker`
+- `us_v4` / `us_v6` sets (with auto-merge)
+- `ssh_whitelist_v4` / `ssh_whitelist_v6` (optional)
+- Pre-filter chain (priority -150)
 
-   ```bash
-   sudo nft -c -f /etc/nftables.conf
-   sudo nft -f /etc/nftables.conf
-   ```
+### 2. Apply config
 
-3. **Download US geo data**
+```bash
+sudo nft -c -f /etc/nftables.conf
+sudo nft -f /etc/nftables.conf
+```
 
-   ```bash
-   sudo ./GeoBlocker.sh --setup-geo-data
-   ```
+### 3. Whitelist your current SSH IP
 
-4. **Fast-load the nftables sets**
+```bash
+sudo -E ./GeoBlocker.sh --whitelist-add-current
+```
 
-   ```bash
-   sudo ./GeoBlocker.sh --fast-load
-   ```
+### 4. Download US geo data
 
-5. **Optionally whitelist your current IP**
+```bash
+sudo ./GeoBlocker.sh --setup-geo-data
+```
 
-   ```bash
-   sudo ./GeoBlocker.sh --whitelist-add-current
-   ```
+### 5. Fast-load nftables sets
 
-6. **Check everything**
+```bash
+sudo ./GeoBlocker.sh --fast-load
+```
 
-   ```bash
-   sudo ./GeoBlocker.sh --investigate
-   ```
+### 6. Investigate
+
+```bash
+sudo ./GeoBlocker.sh --investigate
+```
 
 ---
 
-## Usage
+# Automation (Systemd Timer)
+
+Create service:  
+`/etc/systemd/system/geoblocker-update.service`
+
+```ini
+[Unit]
+Description=Update GeoBlocker IP Lists and Reload Firewall
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/GeoBlocker.sh --setup-geo-data
+ExecStart=/usr/local/sbin/GeoBlocker.sh --fast-load
+```
+
+Create timer:  
+`/etc/systemd/system/geoblocker-update.timer`
+
+```ini
+[Unit]
+Description=Run GeoBlocker Update Daily at 4am
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable timer:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now geoblocker-update.timer
+```
+
+---
+
+# Usage
 
 ```bash
 sudo ./GeoBlocker.sh [ACTION]
@@ -169,157 +217,65 @@ sudo ./GeoBlocker.sh [ACTION]
 
 ---
 
-## Actions
+# Actions
 
 ### `--investigate`
-Shows detailed system and configuration status:
-
-- Privilege context (`EUID`, `USER`, `SUDO_USER`)
-- Presence of required commands (`nft`, `curl`, `install`)
-- Whether `nft` has sufficient privileges
-- Presence of `/etc/nftables.conf`
-- Existence of `table inet filter` and sets `us_v4` / `us_v6`
-- Geo data file availability
-- Presence of the `RSBB_SSH_GEO_LIMIT` snippet
-- SSH client information:
-  - `SSH_CONNECTION`
-  - `SSH_CLIENT`
-  - Client public IP extracted from the session
-- Whitelist sets:
-  - `ssh_whitelist_v4`
-  - `ssh_whitelist_v6`
-- Whether the current SSH client IP is whitelisted
-
----
+Checks system + config state.
 
 ### `--setup-geo-data`
-(Requires **root**)  
-
-Creates `/etc/nftables.d` if missing and downloads US IP ranges from IPdeny:
-
-- `/etc/nftables.d/us-v4.txt` (IPv4 US ranges)
-- `/etc/nftables.d/us-v6.txt` (IPv6 US ranges)
-
-Additional notes:
-
-- Existing files are backed up with timestamped `.bak` copies.
-- Writes use atomic operations via `install`.
-- IPdeny usage limits: <https://www.ipdeny.com/usagelimits.php>
-
----
+Downloads US (or COUNTRY_CODE override) IPdeny lists with backup + atomic write.
 
 ### `--append-ssh-geo-snippet`
-(Requires **root**)  
-
-Backs up `/etc/nftables.conf` and appends a **commented example snippet** showing how to:
-
-- Define `us_v4` and `us_v6`
-- Define `ssh_whitelist_v4` and `ssh_whitelist_v6`
-- Add SSH geo-limit rules for port 22
-
-👉 You must manually integrate these into your `inet filter` table.
-
----
+Appends commented nftables example snippet.
 
 ### `--fast-load`
-(Requires **nft privileges**)  
-
-Flushes and bulk-loads nftables sets:
-
-- `inet filter us_v4` ← `/etc/nftables.d/us-v4.txt`
-- `inet filter us_v6` ← `/etc/nftables.d/us-v6.txt`
-
-Uses chunked loads (512 CIDRs per batch) for speed.
-
----
+Bulk-loads large CIDR sets efficiently.
 
 ### `--flush-sets`
-(Requires **nft privileges**)  
-
-Flushes only:
-
-- `inet filter us_v4`
-- `inet filter us_v6`
-
----
+Flushes `us_v4` and `us_v6`.
 
 ### `--verify-sets`
-(Requires **nft privileges**)  
-
-Shows approximate line counts in:
-
-- `inet filter us_v4`
-- `inet filter us_v6`
-
-And compares them to the geo file line counts.
-
----
+Compares set counts to file counts.
 
 ### `--whitelist-add-current`
-(Requires **nft privileges**)  
+Adds current SSH client IP.
 
-Adds the SSH client’s current IP to the appropriate whitelist:
+### `--whitelist-add <IP>`  
+Add IP.
 
-- IPv4 → `ssh_whitelist_v4`
-- IPv6 → `ssh_whitelist_v6`
+### `--whitelist-remove <IP>`  
+Remove IP.
 
----
+### `--whitelist-list`  
+Show whitelist contents.
 
-### `--whitelist-add <IP>`
-(Requires **nft privileges**)  
-
-Adds a specific IP (IPv4 or IPv6) to the correct whitelist set.
-
----
-
-### `--whitelist-remove <IP>`
-(Requires **nft privileges**)  
-
-Removes the IP from the whitelist set.  
-No error is thrown if the IP is already absent.
+### `--help`  
+Show help.
 
 ---
 
-### `--whitelist-list`
-(Requires **nft privileges**)  
+# Notes & Safety
 
-Lists the contents of:
+- GeoBlocker never applies nftables configs automatically.
+- Use `auto-merge` for IPdeny ranges.
+- Validate nftables config manually:
 
-- `inet filter ssh_whitelist_v4` (if present)
-- `inet filter ssh_whitelist_v6` (if present)
+```bash
+sudo nft -c -f /etc/nftables.conf
+sudo nft -f /etc/nftables.conf
+```
 
----
-
-### `--help`, `-h`
-Shows the help text.
-
----
-
-## Default Behavior
-
-If no action is specified, the script displays `--help`.
+Geo IP source:  
+https://www.ipdeny.com  
+Usage limits: https://www.ipdeny.com/usagelimits.php
 
 ---
 
-## Notes & Safety
+# License
 
-- The script **does not automatically apply nftables configs**.
-- After editing `/etc/nftables.conf`, always validate and apply manually:
-
-  ```bash
-  sudo nft -c -f /etc/nftables.conf   # validate
-  sudo nft -f /etc/nftables.conf      # apply
-  ```
-
-- Ensure `table inet filter` and sets `us_v4` / `us_v6` are defined before using `--fast-load`.
-- Define whitelist sets (`ssh_whitelist_v4`, `ssh_whitelist_v6`) if you plan to use whitelist actions.
-- Geo IP data source: **IPdeny**
-  - <https://www.ipdeny.com>
-  - Usage limits: <https://www.ipdeny.com/usagelimits.php>
+MIT — see the LICENSE file.
 
 ---
 
-## License
-
-This project is licensed under the **MIT License**.  
-See the [LICENSE](LICENSE) file for details.
+# Fix Gemini AI “Could Not Download” Error  
+https://www.youtube.com/watch?v=5X0qZA4Tk5g
