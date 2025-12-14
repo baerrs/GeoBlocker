@@ -140,6 +140,7 @@ Make sure `/etc/nftables.conf` defines:
 sudo nft -c -f /etc/nftables.conf
 sudo nft -f /etc/nftables.conf
 ```
+*Note: If an existing IP is whitelisted, running these commands will remove them unless they are hard coded into nftables.conf*
 
 ### 3. Whitelist your current SSH IP
 
@@ -152,17 +153,16 @@ sudo -E ./GeoBlocker.sh --whitelist-add-current
 ```bash
 sudo ./GeoBlocker.sh --setup-geo-data
 ```
-
-### 5. Fast-load nftables sets
-
-```bash
-sudo ./GeoBlocker.sh --fast-load
-```
-
-### 6. Investigate
+### 5. Investigate
 
 ```bash
 sudo ./GeoBlocker.sh --investigate
+```
+
+### 6. Fast-load nftables sets
+
+```bash
+sudo ./GeoBlocker.sh --fast-load
 ```
 
 ---
