@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # GeoBlocker.sh — SSH US-only Geo-Limit helper for nftables (Ubuntu 24.04)
-# VERSION: v1.3.0
+# VERSION: v1.4.0
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
@@ -36,6 +36,11 @@
 #     - Usage limits and terms: https://www.ipdeny.com/usagelimits.php
 #
 # CHANGELOG
+# - v1.4.0:
+#     * Critical Safety Fix: Enhanced download validation.
+#     * The script now explicitly checks for empty (0-byte) downloads.
+#     * If a download fails or is empty, it aborts immediately, preserving
+#       the existing IP lists instead of overwriting them with empty files.
 # - v1.3.0:
 #     * UFW Compatibility / Pre-Filter Mode:
 #         - Changed default TABLE from 'filter' to 'geoblocker' to avoid UFW conflicts.
@@ -116,7 +121,7 @@
 #        sudo ./GeoBlocker.sh --verify-sets
 #
 #   5) Manage whitelist:
-#        sudo ./GeoBlocker.sh --whitelist-add-current   # add your current IP
+#        sudo ./GeoBlocker.sh --whitelist-add-current    # add your current IP
 #        sudo ./GeoBlocker.sh --whitelist-list
 #
 #   6) (Optional) Add a cron/systemd timer to refresh IPdeny lists and reload
@@ -129,7 +134,7 @@ IFS=$'\n\t'
 # Country code for Geo IP data (IPdeny, ISO 3166-1 alpha-2, lowercase)
 COUNTRY_CODE="${COUNTRY_CODE:-us}"
 
-VERSION='v1.3.0'
+VERSION='v1.4.0'
 SCRIPT_NAME="$(basename "$0")"
 ACTION="${1:-"--help"}"
 
@@ -210,9 +215,14 @@ download_file_atomic() {
     die "Download failed from '$url'"
   fi
 
+  # VALIDATION FIX v1.4.0:
+  # Check if file is empty. If it is, delete temp and ABORT.
+  # This prevents overwriting good data with a 0-byte file.
   if [[ ! -s "$tmp" ]]; then
     rm -f -- "$tmp"
-    die "Downloaded file from '$url' is empty; aborting"
+    log "CRITICAL: Downloaded file from '$url' is empty (0 bytes)."
+    log "Keeping existing file (if any). Aborting operation."
+    die "Validation failed: Empty file download."
   fi
 
   backup_file "$dest"
