@@ -5,7 +5,8 @@
 #
 # AUTHORS / ORIGIN:
 #   - R. Scott Baer <baerrs@gmail.com>
-#   - OpenAI GPT-5.1 Thinking (AI-assisted design and implementation)
+#   - OpenAI GPT-5.1 (Initial Architecture)
+#   - Google Gemini (v1.4.0 Safety Logic & Systemd Integration)
 #
 # LICENSE: MIT
 #
